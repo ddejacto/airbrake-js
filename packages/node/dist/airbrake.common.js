@@ -5,7 +5,7 @@ Object.defineProperty(exports, '__esModule', { value: true });
 function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
 
 var ErrorStackParser = _interopDefault(require('error-stack-parser'));
-var fetch = _interopDefault(require('cross-fetch'));
+var fetch$1 = _interopDefault(require('cross-fetch'));
 var asyncHooks = require('async_hooks');
 
 /*! *****************************************************************************
@@ -638,7 +638,7 @@ function request(req) {
         method: req.method,
         body: req.body,
     };
-    return fetch(req.url, opt).then(function (resp) {
+    return fetch$1(req.url, opt).then(function (resp) {
         if (resp.status === 401) {
             throw errors.unauthorized;
         }
@@ -1420,6 +1420,426 @@ var Queues = /** @class */ (function () {
     return Queues;
 }());
 
+function windowFilter(notice) {
+    if (window.navigator && window.navigator.userAgent) {
+        notice.context.userAgent = window.navigator.userAgent;
+    }
+    if (window.location) {
+        notice.context.url = String(window.location);
+        // Set root directory to group errors on different subdomains together.
+        notice.context.rootDirectory =
+            window.location.protocol + '//' + window.location.host;
+    }
+    return notice;
+}
+
+var CONSOLE_METHODS = ['debug', 'log', 'info', 'warn', 'error'];
+function instrumentConsole(notifier) {
+    var _loop_1 = function (m) {
+        if (!(m in console)) {
+            return "continue";
+        }
+        var oldFn = console[m];
+        var newFn = (function () {
+            var args = [];
+            for (var _i = 0; _i < arguments.length; _i++) {
+                args[_i] = arguments[_i];
+            }
+            oldFn.apply(console, args);
+            notifier.scope().pushHistory({
+                type: 'log',
+                severity: m,
+                arguments: args,
+            });
+        });
+        newFn.inner = oldFn;
+        console[m] = newFn;
+    };
+    // tslint:disable-next-line:no-this-assignment
+    for (var _i = 0, CONSOLE_METHODS_1 = CONSOLE_METHODS; _i < CONSOLE_METHODS_1.length; _i++) {
+        var m = CONSOLE_METHODS_1[_i];
+        _loop_1(m);
+    }
+}
+
+var elemAttrs = ['type', 'name', 'src'];
+function instrumentDOM(notifier) {
+    var handler = makeEventHandler(notifier);
+    if (window.addEventListener) {
+        window.addEventListener('load', handler);
+        window.addEventListener('error', function (event) {
+            if (getProp(event, 'error')) {
+                return;
+            }
+            handler(event);
+        }, true);
+    }
+    if (typeof document === 'object' && document.addEventListener) {
+        document.addEventListener('DOMContentLoaded', handler);
+        document.addEventListener('click', handler);
+        document.addEventListener('keypress', handler);
+    }
+}
+function makeEventHandler(notifier) {
+    return function (event) {
+        var target = getProp(event, 'target');
+        if (!target) {
+            return;
+        }
+        var state = { type: event.type };
+        try {
+            state.target = elemPath(target);
+        }
+        catch (err) {
+            state.target = "<" + String(err) + ">";
+        }
+        notifier.scope().pushHistory(state);
+    };
+}
+function elemName(elem) {
+    if (!elem) {
+        return '';
+    }
+    var s = [];
+    if (elem.tagName) {
+        s.push(elem.tagName.toLowerCase());
+    }
+    if (elem.id) {
+        s.push('#');
+        s.push(elem.id);
+    }
+    if (elem.classList && Array.from) {
+        s.push('.');
+        s.push(Array.from(elem.classList).join('.'));
+    }
+    else if (elem.className) {
+        var str = classNameString(elem.className);
+        if (str !== '') {
+            s.push('.');
+            s.push(str);
+        }
+    }
+    if (elem.getAttribute) {
+        for (var _i = 0, elemAttrs_1 = elemAttrs; _i < elemAttrs_1.length; _i++) {
+            var attr = elemAttrs_1[_i];
+            var value = elem.getAttribute(attr);
+            if (value) {
+                s.push("[" + attr + "=\"" + value + "\"]");
+            }
+        }
+    }
+    return s.join('');
+}
+function classNameString(name) {
+    if (name.split) {
+        return name.split(' ').join('.');
+    }
+    if (name.baseVal && name.baseVal.split) {
+        // SVGAnimatedString
+        return name.baseVal.split(' ').join('.');
+    }
+    console.error('unsupported HTMLElement.className type', typeof name);
+    return '';
+}
+function elemPath(elem) {
+    var maxLen = 10;
+    var path = [];
+    var parent = elem;
+    while (parent) {
+        var name_1 = elemName(parent);
+        if (name_1 !== '') {
+            path.push(name_1);
+            if (path.length > maxLen) {
+                break;
+            }
+        }
+        parent = parent.parentNode;
+    }
+    if (path.length === 0) {
+        return String(elem);
+    }
+    return path.reverse().join(' > ');
+}
+function getProp(obj, prop) {
+    try {
+        return obj[prop];
+    }
+    catch (_) {
+        // Permission denied to access property
+        return null;
+    }
+}
+
+function instrumentFetch(notifier) {
+    // tslint:disable-next-line:no-this-assignment
+    var oldFetch = window.fetch;
+    window.fetch = function (req, options) {
+        var state = {
+            type: 'xhr',
+            date: new Date(),
+        };
+        state.method = options && options.method ? options.method : 'GET';
+        if (typeof req === 'string') {
+            state.url = req;
+        }
+        else {
+            state.method = req.method;
+            state.url = req.url;
+        }
+        // Some platforms (e.g. react-native) implement fetch via XHR.
+        notifier._ignoreNextXHR++;
+        setTimeout(function () { return notifier._ignoreNextXHR--; });
+        return oldFetch
+            .apply(this, arguments)
+            .then(function (resp) {
+            state.statusCode = resp.status;
+            state.duration = new Date().getTime() - state.date.getTime();
+            notifier.scope().pushHistory(state);
+            return resp;
+        })
+            .catch(function (err) {
+            state.error = err;
+            state.duration = new Date().getTime() - state.date.getTime();
+            notifier.scope().pushHistory(state);
+            throw err;
+        });
+    };
+}
+
+var lastLocation = '';
+// In some environments (i.e. Cypress) document.location may sometimes be null
+function getCurrentLocation() {
+    return document.location && document.location.pathname;
+}
+function instrumentLocation(notifier) {
+    lastLocation = getCurrentLocation();
+    var oldFn = window.onpopstate;
+    window.onpopstate = function abOnpopstate(_event) {
+        var url = getCurrentLocation();
+        if (url) {
+            recordLocation(notifier, url);
+        }
+        if (oldFn) {
+            return oldFn.apply(this, arguments);
+        }
+    };
+    var oldPushState = history.pushState;
+    history.pushState = function abPushState(_state, _title, url) {
+        if (url) {
+            recordLocation(notifier, url.toString());
+        }
+        oldPushState.apply(this, arguments);
+    };
+}
+function recordLocation(notifier, url) {
+    var index = url.indexOf('://');
+    if (index >= 0) {
+        url = url.slice(index + 3);
+        index = url.indexOf('/');
+        url = index >= 0 ? url.slice(index) : '/';
+    }
+    else if (url.charAt(0) !== '/') {
+        url = '/' + url;
+    }
+    notifier.scope().pushHistory({
+        type: 'location',
+        from: lastLocation,
+        to: url,
+    });
+    lastLocation = url;
+}
+
+function instrumentXHR(notifier) {
+    function recordReq(req) {
+        var state = req.__state;
+        state.statusCode = req.status;
+        state.duration = new Date().getTime() - state.date.getTime();
+        notifier.scope().pushHistory(state);
+    }
+    var oldOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function abOpen(method, url, _async, _user, _password) {
+        if (notifier._ignoreNextXHR === 0) {
+            this.__state = {
+                type: 'xhr',
+                method: method,
+                url: url,
+            };
+        }
+        oldOpen.apply(this, arguments);
+    };
+    var oldSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function abSend(_data) {
+        var oldFn = this.onreadystatechange;
+        this.onreadystatechange = function (_ev) {
+            if (this.readyState === 4 && this.__state) {
+                recordReq(this);
+            }
+            if (oldFn) {
+                return oldFn.apply(this, arguments);
+            }
+        };
+        if (this.__state) {
+            this.__state.date = new Date();
+        }
+        return oldSend.apply(this, arguments);
+    };
+}
+
+var Notifier = /** @class */ (function (_super) {
+    __extends$1(Notifier, _super);
+    function Notifier(opt) {
+        var _this = _super.call(this, opt) || this;
+        _this.offline = false;
+        _this.todo = [];
+        _this._ignoreWindowError = 0;
+        _this._ignoreNextXHR = 0;
+        _this.addFilter(windowFilter);
+        if (window.addEventListener) {
+            _this.onOnline = _this.onOnline.bind(_this);
+            window.addEventListener('online', _this.onOnline);
+            _this.onOffline = _this.onOffline.bind(_this);
+            window.addEventListener('offline', _this.onOffline);
+            _this.onUnhandledrejection = _this.onUnhandledrejection.bind(_this);
+            window.addEventListener('unhandledrejection', _this.onUnhandledrejection);
+            _this._onClose.push(function () {
+                window.removeEventListener('online', _this.onOnline);
+                window.removeEventListener('offline', _this.onOffline);
+                window.removeEventListener('unhandledrejection', _this.onUnhandledrejection);
+            });
+        }
+        // TODO: deprecated
+        if (_this._opt.ignoreWindowError) {
+            opt.instrumentation.onerror = false;
+        }
+        _this._instrument(opt.instrumentation);
+        return _this;
+    }
+    Notifier.prototype._instrument = function (opt) {
+        if (opt === void 0) { opt = {}; }
+        opt.console = !isDevEnv(this._opt.environment);
+        if (enabled(opt.onerror)) {
+            // tslint:disable-next-line:no-this-assignment
+            var self_1 = this;
+            var oldHandler_1 = window.onerror;
+            window.onerror = function abOnerror() {
+                if (oldHandler_1) {
+                    oldHandler_1.apply(this, arguments);
+                }
+                self_1.onerror.apply(self_1, arguments);
+            };
+        }
+        instrumentDOM(this);
+        if (enabled(opt.fetch) && typeof fetch === 'function') {
+            instrumentFetch(this);
+        }
+        if (enabled(opt.history) && typeof history === 'object') {
+            instrumentLocation(this);
+        }
+        if (enabled(opt.console) && typeof console === 'object') {
+            instrumentConsole(this);
+        }
+        if (enabled(opt.xhr) && typeof XMLHttpRequest !== 'undefined') {
+            instrumentXHR(this);
+        }
+    };
+    Notifier.prototype.notify = function (err) {
+        var _this = this;
+        if (this.offline) {
+            return new Promise(function (resolve, reject) {
+                _this.todo.push({
+                    err: err,
+                    resolve: resolve,
+                    reject: reject,
+                });
+                while (_this.todo.length > 100) {
+                    var j = _this.todo.shift();
+                    if (j === undefined) {
+                        break;
+                    }
+                    j.resolve({
+                        error: new Error('airbrake: offline queue is too large'),
+                    });
+                }
+            });
+        }
+        return _super.prototype.notify.call(this, err);
+    };
+    Notifier.prototype.onOnline = function () {
+        this.offline = false;
+        var _loop_1 = function (j) {
+            this_1.notify(j.err).then(function (notice) {
+                j.resolve(notice);
+            });
+        };
+        var this_1 = this;
+        for (var _i = 0, _a = this.todo; _i < _a.length; _i++) {
+            var j = _a[_i];
+            _loop_1(j);
+        }
+        this.todo = [];
+    };
+    Notifier.prototype.onOffline = function () {
+        this.offline = true;
+    };
+    Notifier.prototype.onUnhandledrejection = function (e) {
+        // Handle native or bluebird Promise rejections
+        // https://developer.mozilla.org/en-US/docs/Web/Events/unhandledrejection
+        // http://bluebirdjs.com/docs/api/error-management-configuration.html
+        var reason = e.reason ||
+            (e.detail && e.detail.reason);
+        if (!reason) {
+            return;
+        }
+        var msg = reason.message || String(reason);
+        if (msg.indexOf && msg.indexOf('airbrake: ') === 0) {
+            return;
+        }
+        this.notify(reason);
+    };
+    Notifier.prototype.onerror = function (message, filename, line, column, err) {
+        if (this._ignoreWindowError > 0) {
+            return;
+        }
+        if (err) {
+            this.notify({
+                error: err,
+                context: {
+                    windowError: true,
+                },
+            });
+            return;
+        }
+        // Ignore errors without file or line.
+        if (!filename || !line) {
+            return;
+        }
+        this.notify({
+            error: {
+                message: message,
+                fileName: filename,
+                lineNumber: line,
+                columnNumber: column,
+                noStack: true,
+            },
+            context: {
+                windowError: true,
+            },
+        });
+    };
+    Notifier.prototype._ignoreNextWindowError = function () {
+        var _this = this;
+        this._ignoreWindowError++;
+        setTimeout(function () { return _this._ignoreWindowError--; });
+    };
+    return Notifier;
+}(BaseNotifier));
+function isDevEnv(env) {
+    return env && env.startsWith && env.startsWith('dev');
+}
+function enabled(v) {
+    return v === undefined || v === true;
+}
+
 var os = require('os');
 function nodeFilter(notice) {
     if (notice.context.notifier) {
@@ -1480,7 +1900,7 @@ var ScopeManager = /** @class */ (function () {
     return ScopeManager;
 }());
 
-var Notifier = /** @class */ (function (_super) {
+var Notifier$1 = /** @class */ (function (_super) {
     __extends(Notifier, _super);
     function Notifier(opt) {
         var _this = this;
@@ -1596,5 +2016,5 @@ var Notifier = /** @class */ (function (_super) {
     return Notifier;
 }(BaseNotifier));
 
-exports.Notifier = Notifier;
+exports.Notifier = Notifier$1;
 //# sourceMappingURL=airbrake.common.js.map

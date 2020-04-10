@@ -1767,5 +1767,5 @@ function enabled(v) {
     return v === undefined || v === true;
 }
 
-export { Notifier };
+export { BaseNotifier, Notifier, QueryInfo, Scope };
 //# sourceMappingURL=airbrake.esm.js.map

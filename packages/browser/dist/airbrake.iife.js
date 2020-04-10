@@ -2958,7 +2958,10 @@ var Airbrake = (function (exports) {
       return v === undefined || v === true;
   }
 
+  exports.BaseNotifier = BaseNotifier;
   exports.Notifier = Notifier;
+  exports.QueryInfo = QueryInfo;
+  exports.Scope = Scope;
 
   return exports;
 

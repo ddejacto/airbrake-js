@@ -15,6 +15,7 @@
     "notifier"
   ],
   "dependencies": {
+    "@airbrake/browser": "^1.0.7",
     "cross-fetch": "^3.0.4",
     "error-stack-parser": "^2.0.4",
     "tdigest": "^0.1.1"
@@ -39,7 +40,7 @@
   "main": "dist/airbrake.common.js",
   "module": "dist/airbrake.esm.js",
   "jsnext:main": "dist/airbrake.esm.js",
-  "types": "dist/airbrake.d.ts",
+  "types": "dist/index.d.ts",
   "files": [
     "dist/",
     "README.md",

@@ -1773,5 +1773,8 @@ function enabled(v) {
     return v === undefined || v === true;
 }
 
+exports.BaseNotifier = BaseNotifier;
 exports.Notifier = Notifier;
+exports.QueryInfo = QueryInfo;
+exports.Scope = Scope;
 //# sourceMappingURL=airbrake.common.js.map
